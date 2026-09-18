@@ -6,7 +6,7 @@ Jev integration.
 
 Both expose the same interface, so pipeline.py does not care which is used.
 """
-import os as _os
+import os
 import re
 import threading
 
@@ -16,12 +16,23 @@ try:
 except ImportError:
     _SDK = False
 
-TYPESAFE_API_KEY = "" # <-- set this before running
+
+# ----------------------------------------------------------------------
+# Paste your TypeSafe API key here.
+# Setting the env var from Python means we don't care what keyword
+# arguments the SDK constructor accepts.
+# Leave this empty to fall back to the TYPESAFE_API_KEY environment
+# variable, or to MockJev if neither is set.
+# ----------------------------------------------------------------------
+TYPESAFE_API_KEY = ""    # <-- put your key between the quotes
+
 if TYPESAFE_API_KEY:
-    _os.environ["TYPESAFE_API_KEY"] = TYPESAFE_API_KEY
-# ----------------------------------------------------------------------
+    os.environ["TYPESAFE_API_KEY"] = TYPESAFE_API_KEY
+
+
+# ======================================================================
 # RealJev — TypeSafe API
-# ----------------------------------------------------------------------
+# ======================================================================
 _thread_local = threading.local()
 
 
@@ -79,20 +90,35 @@ class RealJev:
         questions = {
             "action": Choice(
                 instructions=(
-                    "What action does this utterance request? "
-                    "Use 'Continuation' if the utterance is a noun-phrase "
-                    "extension of the previous chunk rather than a new "
-                    "command. Use 'Speak_Query' if it asks a question. "
-                    "A lock: 'lock the door' is On, 'unlock' is Off."
+                    "What action does this utterance request?\n"
+                    "- If the utterance says 'turn on', 'switch on', "
+                    "'power on', 'enable', 'lock the...' and does NOT "
+                    "specify a value (no percentage, no colour, no "
+                    "temperature), the action is On.\n"
+                    "- If the utterance says 'turn off', 'switch off', "
+                    "'shut off', 'disable', 'unlock the...', the action "
+                    "is Off.\n"
+                    "- If the utterance says 'toggle' or 'flip', the "
+                    "action is Toggle.\n"
+                    "- If the utterance names a specific value "
+                    "('50%', 'warm white', '72 degrees', 'a bit "
+                    "dimmer'), the action is Set_Parameter.\n"
+                    "- If the utterance names a scene or vibe ('movie "
+                    "night', 'cyberpunk'), the action is Trigger_Scene.\n"
+                    "- If it asks a question ('is', 'what', 'when', "
+                    "'?'), the action is Speak_Query.\n"
+                    "- If it is a noun-phrase continuation of the "
+                    "previous chunk with no new verb, the action is "
+                    "Continuation."
                 ),
                 criteria={
-                    "Toggle": "Flip a device on/off, or a lock locked/unlocked",
-                    "On": "Turn on, or lock a door",
-                    "Off": "Turn off, or unlock a door",
-                    "Set_Parameter": "Set a specific value: brightness, colour, temperature",
-                    "Trigger_Scene": "Activate a scene or vibe",
-                    "Speak_Query": "Ask a question, no state change",
-                    "Continuation": "Noun-phrase extension of the previous chunk",
+                    "Toggle": "Flip a device on/off or lock/unlock, no value specified",
+                    "On":     "Turn on, lock, enable — no value specified",
+                    "Off":    "Turn off, unlock, disable — no value specified",
+                    "Set_Parameter": "Set a specific value: percentage, colour, temperature",
+                    "Trigger_Scene": "Activate a named scene or unspecified vibe",
+                    "Speak_Query":   "Ask a question; no state change",
+                    "Continuation":  "Noun-phrase extension of the previous chunk",
                 },
             ),
             "room": Choice(
@@ -167,8 +193,12 @@ class RealJev:
             f"is_target_{i}": Noul(
                 instructions=(
                     f"Is device '{did}' a target of this utterance? "
-                    f"Answer yes only if the utterance clearly refers to this "
-                    f"device, its room, or its type."
+                    f"Common synonyms count: lamp / bulb / light / "
+                    f"fixture all refer to the same thing. door / lock "
+                    f"are the same. A 'gate' is a kind of lock if its "
+                    f"id contains 'gate'. Answer yes only if the "
+                    f"utterance clearly refers to this device, its "
+                    f"room, or its type."
                 ),
             )
             for i, did in enumerate(candidate_ids)
@@ -382,12 +412,12 @@ class RealJev:
         }
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # MockJev — offline heuristic fallback
-# ----------------------------------------------------------------------
+# ======================================================================
 ROOM_HINTS = {"kitchen": "kitchen", "living room": "living_room",
               "lounge": "living_room", "bedroom": "bedroom",
-              "entry": "entry", "hallway": "entry"}
+              "entry": "entry", "hallway": "entry", "garage": "garage"}
 
 SCENE_HINTS = {"movie night": "movie_night", "cinema mode": "movie_night",
                "good morning": "good_morning", "relax": "relax",
@@ -444,6 +474,15 @@ class MockJev:
                "relative_shift": "None", "scene": "None",
                "confidence": {}}
 
+        # Detect whether the utterance specifies a value
+        has_value = bool(
+            re.search(r"\d+\s*%", t) or
+            re.search(r"\d+\s*(?:°|degrees?|c\b)", t) or
+            re.search(r"#([0-9A-Fa-f]{6})", t) or
+            any(w in t for w in ["warm white", "warm ", "cool white",
+                                  "50", "25", "75", "percent"])
+        )
+
         if any(w in t for w in QUERY_WORDS):
             out["action"] = "Speak_Query"
             out["confidence"]["action"] = 0.97
@@ -451,8 +490,12 @@ class MockJev:
             out["action"] = "Off"
             out["confidence"]["action"] = 0.97
         elif any(w in t for w in ON_WORDS):
-            out["action"] = "On"
-            out["confidence"]["action"] = 0.96
+            if has_value:
+                out["action"] = "Set_Parameter"
+                out["confidence"]["action"] = 0.85
+            else:
+                out["action"] = "On"
+                out["confidence"]["action"] = 0.96
         elif any(w in t for w in TOGGLE_WORDS):
             out["action"] = "Toggle"
             out["confidence"]["action"] = 0.95
@@ -516,23 +559,55 @@ class MockJev:
         t = chunk.lower()
         out = {}
         for did in candidate_ids:
-            short = did.split(".")[-1].replace("_", " ")
             room = did.split(".")[1].split("_")[0] if "." in did else ""
+            dev_type = did.split(".")[0]
             prob = 0.05
-            type_hint = did.split(".")[0]
-            if type_hint in t or type_hint + "s" in t:
+
+            # Type keyword
+            if dev_type in t or dev_type + "s" in t:
                 prob = max(prob, 0.85)
-            if "light" in t and type_hint == "light":
-                prob = max(prob, 0.90)
-            if "lock" in t and type_hint == "lock":
-                prob = max(prob, 0.90)
-            if "door" in t and "lock" in did:
-                prob = max(prob, 0.95)
+
+            # Light synonyms
+            if dev_type == "light":
+                if any(w in t for w in ["light", "lights", "lamp", "lamps",
+                                         "bulb", "bulbs", "fixture", "fixtures",
+                                         "led", "leds"]):
+                    prob = max(prob, 0.90)
+
+            # Lock / door / gate synonyms
+            if dev_type == "lock":
+                if any(w in t for w in ["lock", "locks", "door", "doors",
+                                         "gate", "gates"]):
+                    prob = max(prob, 0.90)
+                if "door" in t and "front" in did:
+                    prob = max(prob, 0.95)
+                if "gate" in t and "gate" in did:
+                    prob = max(prob, 0.95)
+
+            # Thermostat
+            if dev_type == "thermostat":
+                if any(w in t for w in ["thermostat", "temperature",
+                                         "heat", "heating"]):
+                    prob = max(prob, 0.90)
+
+            # Switch / plug
+            if dev_type in ("switch", "plug"):
+                if any(w in t for w in ["switch", "outlet", "plug"]):
+                    prob = max(prob, 0.90)
+
+            # Room mention in device id
             for rname in [room.replace("_", " "), room]:
                 if rname and rname in t:
                     prob = max(prob, 0.92)
+
+            # Possessive / name hints (e.g. "yashils lights")
+            if "yashil" in t and "yashil" in did:
+                prob = max(prob, 0.95)
+
+            # "both" / "all" match everything
             if "both" in t or "all" in t:
                 prob = max(prob, 0.80)
+
             out[did] = {"probability_true": prob}
         return out
 
@@ -606,11 +681,11 @@ class MockJev:
         return out
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # Factory
-# ----------------------------------------------------------------------
+# ======================================================================
 def make_jev(force_mock=False):
-    key = TYPESAFE_API_KEY or _os.environ.get("TYPESAFE_API_KEY")
+    key = TYPESAFE_API_KEY or os.environ.get("TYPESAFE_API_KEY")
     if force_mock:
         print("[jev] using MockJev (forced)")
         return MockJev()
@@ -621,8 +696,8 @@ def make_jev(force_mock=False):
         print("[jev] typesafe-sdk not installed; pip install typesafe-sdk")
         return MockJev()
     try:
-        c = TypeSafeClient()
-        print(f"[jev] TypeSafeClient initialised; key length = {len(key)}")
+        TypeSafeClient()   # smoke test
+        print(f"[jev] using RealJev (type-safe API); key length = {len(key)}")
         return RealJev()
     except Exception as e:
         print(f"[jev] client init failed: {type(e).__name__}: {e}")
