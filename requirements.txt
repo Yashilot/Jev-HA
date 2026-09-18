@@ -1,0 +1,26 @@
+# Smart Home Router — runtime dependencies
+#
+# Only two external packages are needed. Everything else is Python
+# standard library (dataclasses, threading, uuid, re, tkinter, etc.).
+#
+# Install with:
+#     pip install -r requirements.txt
+#
+# Note: tkinter ships with CPython on Windows and macOS. On Debian/Ubuntu
+# you may also need `sudo apt install python3-tk`. On Fedora:
+# `sudo dnf install python3-tkinter`.
+
+# ----------------------------------------------------------------------
+# Phase 0, Phase 3, Phase 4 — Jev (TypeSafe System One model)
+# Used by jev.py. Requires TYPESAFE_API_KEY in the environment, or the
+# key pasted into jev.py at the TYPESAFE_API_KEY constant.
+# ----------------------------------------------------------------------
+typesafe-sdk>=0.6.0
+
+# ----------------------------------------------------------------------
+# Phase 5 — the read-only Oracle
+# Used by oracle.py. Talks to a local Ollama daemon.
+# Also pull the model once:
+#     ollama pull llama3.1:8b
+# ----------------------------------------------------------------------
+ollama>=0.4.0
